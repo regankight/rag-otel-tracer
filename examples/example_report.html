@@ -1,0 +1,28 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>RAG trace report</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 2rem; color: #1a1a1a; }
+  h2 { margin-top: 2rem; }
+  .total { font-weight: normal; color: #666; font-size: 0.9rem; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }
+  th, td { text-align: left; padding: 6px 12px; border-bottom: 1px solid #ddd; }
+  th { background: #f5f5f5; }
+  tr.error td { color: #b00020; }
+</style></head>
+<body>
+<h1>RAG trace report</h1>
+<h2>Trace 6513270e269e <span class='total'>total 100.1ms</span></h2>
+<table><tr><th>Stage</th><th>Duration</th><th>Detail</th><th>Status</th></tr>
+<tr><td>es_hybrid_search</td><td>25.2ms</td><td>5 docs retrieved, top_score=0.775</td><td>OK</td></tr>
+<tr><td>cross_encoder_rerank</td><td>12.6ms</td><td>5 -&gt; 5 docs reranked</td><td>OK</td></tr>
+<tr><td>assemble_context</td><td>6.3ms</td><td>5 chunks assembled, 60/200 tokens used</td><td>OK</td></tr>
+<tr><td>llm_generate</td><td>55.1ms</td><td>model=gpt-4o-mini, in=68 out=17 tokens</td><td>OK</td></tr>
+</table>
+<h2>Trace 95e60af593bd <span class='total'>total 46.5ms</span></h2>
+<table><tr><th>Stage</th><th>Duration</th><th>Detail</th><th>Status</th></tr>
+<tr><td>es_hybrid_search</td><td>25.1ms</td><td>1 docs retrieved, top_score=0.57</td><td>OK</td></tr>
+<tr><td>cross_encoder_rerank</td><td>12.6ms</td><td>1 -&gt; 1 docs reranked</td><td>OK</td></tr>
+<tr><td>assemble_context</td><td>6.3ms</td><td>1 chunks assembled, 13/200 tokens used</td><td>OK</td></tr>
+<tr class='error'><td>llm_generate</td><td>1.4ms</td><td>model=gpt-4o-mini, in=? out=? tokens</td><td>ERROR</td></tr>
+</table>
+</body></html>

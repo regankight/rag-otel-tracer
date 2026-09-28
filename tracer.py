@@ -1,0 +1,163 @@
+"""Drop-in tracing for a RAG pipeline, built on real OpenTelemetry spans.
+
+Design decision: this wraps the actual `opentelemetry-sdk`, not a bespoke
+logger that merely borrows OTel's attribute names. The payoff: the JSONL
+this produces is generated from real `ReadableSpan` objects, so swapping
+JSONLFileSpanExporter for OTLPSpanExporter is a one-line change to point
+this at Jaeger, Grafana Tempo, or any other OTel collector -- nothing about
+the instrumentation calls below would need to change.
+
+Usage:
+
+    from tracer import configure, traced_request, traced_stage, record_retrieved_documents
+    from models import StageType
+
+    configure("traces.jsonl")
+
+    with traced_request("rag_request"):
+        with traced_stage(StageType.RETRIEVAL, "es_hybrid_search") as span:
+            docs = my_retriever(query)
+            record_retrieved_documents(span, docs)
+        ...
+"""
+
+from __future__ import annotations
+
+import json
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator, Sequence
+
+from opentelemetry import trace
+from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
+from opentelemetry.trace import Span, Status, StatusCode
+
+from models import RetrievedDocument, StageType
+
+_TRACER_NAME = "rag_obs"
+_configured = False
+
+
+class JSONLFileSpanExporter(SpanExporter):
+    """Appends each finished span to a JSONL file, one span per line.
+
+    JSONL rather than a single JSON array so a trace file can be tailed or
+    grown across multiple runs without re-writing the whole thing.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        with self.path.open("a", encoding="utf-8") as f:
+            for span in spans:
+                f.write(json.dumps(_span_to_record(span)) + "\n")
+        return SpanExportResult.SUCCESS
+
+    def shutdown(self) -> None:
+        pass
+
+    def force_flush(self, timeout_millis: int = 30_000) -> bool:
+        return True
+
+
+def _span_to_record(span: ReadableSpan) -> dict:
+    ctx = span.get_span_context()
+    parent = span.parent
+    start = span.start_time or 0
+    end = span.end_time or start
+    return {
+        "trace_id": format(ctx.trace_id, "032x"),
+        "span_id": format(ctx.span_id, "016x"),
+        "parent_span_id": format(parent.span_id, "016x") if parent else None,
+        "name": span.name,
+        "start_time_ns": start,
+        "end_time_ns": end,
+        "duration_ms": (end - start) / 1_000_000,
+        "status": span.status.status_code.name,
+        "attributes": dict(span.attributes or {}),
+        "events": [
+            {
+                "name": event.name,
+                "timestamp_ns": event.timestamp,
+                "attributes": dict(event.attributes or {}),
+            }
+            for event in span.events
+        ],
+    }
+
+
+def configure(output_path: str | Path = "traces.jsonl") -> None:
+    """Point the global tracer provider at a JSONL file. Call once, at startup.
+
+    Idempotent -- safe to call multiple times (e.g. once per test) without
+    stacking up duplicate processors, since re-configuring a provider that's
+    already set is a no-op in the OTel SDK.
+    """
+    global _configured
+    if _configured:
+        return
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(JSONLFileSpanExporter(output_path)))
+    trace.set_tracer_provider(provider)
+    _configured = True
+
+
+def _tracer() -> trace.Tracer:
+    return trace.get_tracer(_TRACER_NAME)
+
+
+@contextmanager
+def traced_request(name: str = "rag_request") -> Iterator[Span]:
+    """The root span for one end-to-end RAG request; every stage nests under it."""
+    with _tracer().start_as_current_span(name) as span:
+        yield span
+
+
+@contextmanager
+def traced_stage(stage: StageType, name: str, **attributes: str | int | float | bool) -> Iterator[Span]:
+    """One pipeline stage (retrieval/rerank/context_assembly/generation) as a child span.
+
+    Records `gen_ai.operation.name`, times the block automatically, and on
+    any exception records it on the span (status=ERROR + the exception
+    itself) before re-raising -- the failure shows up in the trace instead
+    of just crashing silently past your logging.
+    """
+    with _tracer().start_as_current_span(name) as span:
+        span.set_attribute("gen_ai.operation.name", stage.value)
+        for key, value in attributes.items():
+            span.set_attribute(key, value)
+        try:
+            yield span
+        except Exception as exc:
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            raise
+        else:
+            span.set_status(Status(StatusCode.OK))
+
+
+def record_retrieved_documents(span: Span, documents: Sequence[RetrievedDocument]) -> None:
+    """Attach a validated list of retrieved documents to a retrieval span.
+
+    One OTel event per document (not a single JSON-blob attribute): the
+    GenAI semantic conventions require retrieval documents to be recorded
+    in *structured* form on events, whereas span attributes are flat by
+    design and only permit a JSON-string fallback. Events keep each
+    document's id/score/rank queryable individually by anything reading the
+    trace, not just greppable as a blob.
+    """
+    span.set_attribute("retrieval.document_count", len(documents))
+    if documents:
+        span.set_attribute("retrieval.top_score", documents[0].score)
+    for doc in documents:
+        span.add_event(
+            "gen_ai.retrieval.documents",
+            attributes={
+                "gen_ai.document.id": doc.id,
+                "gen_ai.document.score": doc.score,
+                "gen_ai.document.rank": doc.rank,
+            },
+        )
