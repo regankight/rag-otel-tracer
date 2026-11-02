@@ -178,35 +178,37 @@ One run on a MacBook Air, committed as [`examples/real_trace.jsonl`](examples/re
 The first trace is the one-off index build (loading the embedding model and embedding the chunks):
 
 ```
-Trace e3251209d5a6  total=6680.5ms
+Trace 3c6c03de7d8c  total=6423.2ms
 
-Trace 05b9316df1c8  total=8670.7ms
-  embedding_search             17.0ms   3 docs retrieved, top_score=0.6751
+Trace c94be1b5dae3  total=4074.6ms
+  embedding_search             17.7ms   3 docs retrieved, top_score=0.6751
   assemble_context              0.6ms   2 chunks assembled, 331/400 tokens used
-  ollama_chat                8651.7ms   model=llama3.2, in=374 out=60 tokens
+  ollama_chat                4055.2ms   model=llama3.2, in=374 out=66 tokens
 
-Trace 951b5f56f9d9  total=2364.1ms
-  embedding_search            267.8ms   3 docs retrieved, top_score=0.6152
-  assemble_context              0.7ms   2 chunks assembled, 327/400 tokens used
-  ollama_chat                2094.8ms   model=llama3.2, in=385 out=63 tokens
+Trace 88624f637cc2  total=2510.2ms
+  embedding_search            137.4ms   3 docs retrieved, top_score=0.6152
+  assemble_context              0.8ms   2 chunks assembled, 327/400 tokens used
+  ollama_chat                2370.6ms   model=llama3.2, in=385 out=76 tokens
 
-Trace 7d2f564caa94  total=78.0ms
-  embedding_search             71.6ms   3 docs retrieved, top_score=0.3732
-  assemble_context              0.8ms   2 chunks assembled, 331/400 tokens used
-  ollama_chat                   4.6ms   model=model-that-is-not-installed, in=? out=? tokens  [ERROR]
+Trace 3265dfaa4d55  total=71.6ms
+  embedding_search             64.8ms   3 docs retrieved, top_score=0.3732
+  assemble_context              0.7ms   2 chunks assembled, 331/400 tokens used
+  ollama_chat                   4.8ms   model=model-that-is-not-installed, in=? out=? tokens  [ERROR]
 ```
 
 What the trace shows:
 
-- **Generation is nearly all of the latency:** 8,652 of 8,671 ms on the first request and
-  2,095 of 2,364 ms on the second. Retrieval and context assembly never took more than 269 ms together.
-- **The first LLM call took about 4× as long as the second** (8.7 s vs 2.1 s) for similar prompts
-  (374 vs 385 input tokens). That fits Ollama loading the model on first use. The trace shows
-  where the time went; it can't say why.
-- **A missing model fails fast and visibly:** 4.6 ms, `status=ERROR`, with the exception on the
-  span, while the stages before it are recorded normally.
-- **Retrieval varied from 17 ms to 268 ms** across the three requests. These are single runs
+- **Generation is nearly all of the latency:** 4,055 of 4,075 ms on the first request and
+  2,371 of 2,510 ms on the second. Retrieval and context assembly never took more than 139 ms together.
+- **The first LLM call was the slower one in both runs so far:** 4.1 s vs 2.4 s here, and 8.7 s vs
+  2.1 s in an earlier run, for similar prompts (374 vs 385 input tokens). That fits Ollama loading
+  the model on first use. The trace shows where the time went; it can't say why.
+- **A missing model fails fast and visibly:** 4.8 ms, `status=ERROR`, with one exception event on
+  the span, while the stages before it are recorded normally.
+- **Retrieval varied from 18 ms to 137 ms** across the three requests. These are single runs
   on one laptop, not a benchmark.
+- **No query text in the file:** content capture was off (the default), so the trace holds
+  timings, scores, token counts and document IDs, but not what was asked.
 
 ## Tests
 
