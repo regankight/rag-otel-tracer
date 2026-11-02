@@ -53,11 +53,15 @@ def load_search(search_repo: Path):
     return search
 
 
+def chunk_key(search, index, i: int) -> str:
+    return f"{index.sources[i]}#{search.format_chunk_id(i)}"
+
+
 def retrieve(search, index, query: str) -> list[RetrievedDocument]:
     ranked = search.rank_chunks(query, index.embeddings, index.model, top_n=TOP_K)
     return [
         RetrievedDocument(
-            id=f"{index.sources[i]}#{search.format_chunk_id(i)}",
+            id=chunk_key(search, index, i),
             score=round(score, 4),
             rank=rank,
             text_preview=index.chunks[i][:200],
@@ -89,7 +93,7 @@ def generate(model_name: str, query: str, context: str):
     return ollama.chat(model=model_name, messages=[{"role": "user", "content": prompt}])
 
 
-def run_request(search, index, query: str, model_name: str) -> str:
+def run_request(search, index, chunk_text: dict[str, str], query: str, model_name: str) -> str:
     with traced_request("rag_request") as root:
         root.set_attribute("gen_ai.retrieval.query.text", query)
 
@@ -101,15 +105,14 @@ def run_request(search, index, query: str, model_name: str) -> str:
             docs = retrieve(search, index, query)
             record_retrieved_documents(span, docs)
 
-        chunk_text = {
-            f"{index.sources[i]}#{search.format_chunk_id(i)}": index.chunks[i] for i in range(len(index.chunks))
-        }
         with traced_stage(
             StageType.CONTEXT_ASSEMBLY, "assemble_context", **{"context.token_budget": TOKEN_BUDGET}
         ) as span:
             context, n_chunks, used = assemble_context(index, docs, chunk_text)
             span.set_attribute("context.chunk_count", n_chunks)
             span.set_attribute("context.total_tokens_used", used)
+            if n_chunks == 0:
+                raise ValueError(f"no retrieved chunk fits the {TOKEN_BUDGET}-token context budget")
 
         with traced_stage(
             StageType.GENERATION,
@@ -139,18 +142,19 @@ def main() -> None:
         index = search.build_index()
         span.set_attribute("index.chunk_count", len(index.chunks))
         span.set_attribute("index.source_count", len(set(index.sources)))
+    chunk_text = {chunk_key(search, index, i): text for i, text in enumerate(index.chunks)}
     print(f"Index: {len(index.chunks)} chunks from {len(set(index.sources))} files "
           f"in {time.perf_counter() - started:.1f}s")
 
     for query in QUESTIONS:
         try:
-            answer = run_request(search, index, query, args.model)
+            answer = run_request(search, index, chunk_text, query, args.model)
             print(f"\nQ: {query}\nA: {answer.strip()}")
         except Exception as exc:  # traced as an error span already; keep going
-            print(f"\nQ: {query}\nGeneration failed (traced): {type(exc).__name__}: {exc}")
+            print(f"\nQ: {query}\nRequest failed (traced; see the ERROR span): {type(exc).__name__}: {exc}")
 
     try:
-        run_request(search, index, FAILING_QUESTION, MISSING_MODEL)
+        run_request(search, index, chunk_text, FAILING_QUESTION, MISSING_MODEL)
     except Exception as exc:
         print(f"\nQ: {FAILING_QUESTION}\nExpected failure (model not installed), traced: {type(exc).__name__}")
 

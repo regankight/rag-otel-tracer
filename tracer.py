@@ -114,6 +114,7 @@ def traced_request(name: str = "rag_request") -> Iterator[Span]:
     """The root span for one end-to-end RAG request; every stage nests under it."""
     with _tracer().start_as_current_span(name) as span:
         yield span
+        span.set_status(Status(StatusCode.OK))
 
 
 @contextmanager
@@ -125,7 +126,7 @@ def traced_stage(stage: StageType, name: str, **attributes: str | int | float | 
     itself) before re-raising -- the failure shows up in the trace instead
     of just crashing silently past your logging.
     """
-    with _tracer().start_as_current_span(name) as span:
+    with _tracer().start_as_current_span(name, record_exception=False, set_status_on_exception=False) as span:
         span.set_attribute("gen_ai.operation.name", stage.value)
         for key, value in attributes.items():
             span.set_attribute(key, value)
