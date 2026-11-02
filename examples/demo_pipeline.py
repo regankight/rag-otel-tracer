@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from models import RetrievedDocument, StageType
-from tracer import configure, record_retrieved_documents, traced_request, traced_stage
+from tracer import configure, record_query, record_retrieved_documents, traced_request, traced_stage
 
 CORPUS = [
     {"id": "doc-1", "text": "Acme Cloud's autoscaler adds nodes when queue depth exceeds 50 for 2 minutes."},
@@ -79,7 +79,7 @@ def fake_generate(query: str, context: str) -> tuple[str, dict[str, int]]:
 
 def run_pipeline(query: str, fail_generation: bool = False) -> str:
     with traced_request("rag_request") as root:
-        root.set_attribute("gen_ai.retrieval.query.text", query)
+        record_query(root, query)
 
         with traced_stage(StageType.RETRIEVAL, "es_hybrid_search", **{"gen_ai.data_source.id": "acme-docs-demo"}) as span:
             docs = fake_retrieve(query)

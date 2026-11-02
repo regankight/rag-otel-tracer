@@ -31,7 +31,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from models import RetrievedDocument, StageType  # noqa: E402
-from tracer import configure, record_retrieved_documents, traced_request, traced_stage  # noqa: E402
+from tracer import (  # noqa: E402
+    basic_redactor,
+    configure,
+    record_query,
+    record_retrieved_documents,
+    traced_request,
+    traced_stage,
+)
 
 QUESTIONS = [
     "How does hybrid search combine keyword and vector results?",
@@ -95,7 +102,7 @@ def generate(model_name: str, query: str, context: str):
 
 def run_request(search, index, chunk_text: dict[str, str], query: str, model_name: str) -> str:
     with traced_request("rag_request") as root:
-        root.set_attribute("gen_ai.retrieval.query.text", query)
+        record_query(root, query)
 
         with traced_stage(
             StageType.RETRIEVAL,
@@ -131,11 +138,16 @@ def main() -> None:
     parser.add_argument("--search-repo", type=Path, required=True, help="path to a rag-search-mcp-server checkout")
     parser.add_argument("--model", default="llama3.2", help="Ollama model to generate with (default: llama3.2)")
     parser.add_argument("--out", type=Path, default=Path(__file__).parent / "real_trace.jsonl")
+    parser.add_argument(
+        "--capture-content",
+        action="store_true",
+        help="record query text on spans (redacted with basic_redactor); off by default",
+    )
     args = parser.parse_args()
 
     search = load_search(args.search_repo.expanduser().resolve())
     args.out.unlink(missing_ok=True)
-    configure(args.out)
+    configure(args.out, capture_content=args.capture_content, redact=basic_redactor)
 
     started = time.perf_counter()
     with traced_request("index_build") as span:

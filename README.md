@@ -86,12 +86,13 @@ status (`OK` or `ERROR`, with the exception attached on failure).
 ## Usage
 
 ```python
-from tracer import configure, traced_request, traced_stage, record_retrieved_documents
+from tracer import configure, record_query, record_retrieved_documents, traced_request, traced_stage
 from models import StageType, RetrievedDocument
 
 configure("traces.jsonl")  # call once, at startup
 
-with traced_request("rag_request"):
+with traced_request("rag_request") as root:
+    record_query(root, query)  # only recorded if content capture is on (see below)
     with traced_stage(StageType.RETRIEVAL, "es_hybrid_search", **{"gen_ai.data_source.id": "my-index"}) as span:
         docs = my_retriever(query)  # -> list[RetrievedDocument]
         record_retrieved_documents(span, docs)
@@ -105,6 +106,24 @@ with traced_request("rag_request"):
     with traced_stage(StageType.GENERATION, "llm_generate", **{"gen_ai.request.model": "gpt-4o-mini"}) as span:
         answer = my_llm_call(query, context)
 ```
+
+### Query text is off by default
+
+The GenAI semantic conventions warn that `gen_ai.retrieval.query.text` may contain sensitive
+information, and a tracing backend is usually readable by more people than the application's
+own data. So `record_query` writes nothing unless content capture is switched on, either with
+`configure(..., capture_content=True)` or with the environment variable the OpenTelemetry Python
+GenAI instrumentations use:
+
+```bash
+export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
+```
+
+Pass `redact=` to scrub text before it's recorded. `basic_redactor` replaces email addresses and
+phone-like numbers with `[EMAIL]` and `[PHONE]`; it's a starting point, not a PII detector (names
+and street addresses pass through, and long numeric IDs are treated as phone numbers). Timings, scores, token counts and document IDs are always recorded.
+Exception messages are recorded as raised, so keep user content out of them. Stack traces name
+files without their directories, so a committed trace doesn't reveal the machine's username or folder layout.
 
 ## Try it in 30 seconds
 

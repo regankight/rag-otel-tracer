@@ -9,12 +9,13 @@ the instrumentation calls below would need to change.
 
 Usage:
 
-    from tracer import configure, traced_request, traced_stage, record_retrieved_documents
+    from tracer import configure, record_query, record_retrieved_documents, traced_request, traced_stage
     from models import StageType
 
     configure("traces.jsonl")
 
-    with traced_request("rag_request"):
+    with traced_request("rag_request") as root:
+        record_query(root, query)  # recorded only if content capture is on
         with traced_stage(StageType.RETRIEVAL, "es_hybrid_search") as span:
             docs = my_retriever(query)
             record_retrieved_documents(span, docs)
@@ -24,9 +25,12 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
+import re
+import traceback
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Callable, Iterator, Sequence
 
 from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
@@ -37,6 +41,12 @@ from models import RetrievedDocument, StageType
 
 _TRACER_NAME = "rag_obs"
 _configured = False
+
+# The same switch the OpenTelemetry Python GenAI instrumentations use for prompt and
+# response content. Off unless set to "true".
+CAPTURE_CONTENT_ENV = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
+_capture_content = False
+_redact: Callable[[str], str] | None = None
 
 
 class JSONLFileSpanExporter(SpanExporter):
@@ -89,20 +99,78 @@ def _span_to_record(span: ReadableSpan) -> dict:
     }
 
 
-def configure(output_path: str | Path = "traces.jsonl") -> None:
+def configure(
+    output_path: str | Path = "traces.jsonl",
+    *,
+    capture_content: bool | None = None,
+    redact: Callable[[str], str] | None = None,
+) -> None:
     """Point the global tracer provider at a JSONL file. Call once, at startup.
+
+    capture_content: record text content (the user's query) on spans. Off by
+    default; None means read CAPTURE_CONTENT_ENV. The GenAI semantic conventions
+    flag query text as possibly sensitive, and a trace backend usually has wider
+    access than the application's own data.
+    redact: applied to every captured text before it is recorded, e.g.
+    basic_redactor or your own PII scrubber.
 
     Idempotent -- safe to call multiple times (e.g. once per test) without
     stacking up duplicate processors, since re-configuring a provider that's
-    already set is a no-op in the OTel SDK.
+    already set is a no-op in the OTel SDK. The content settings are updated
+    on every call.
     """
-    global _configured
+    global _configured, _capture_content, _redact
+    if capture_content is None:
+        capture_content = os.environ.get(CAPTURE_CONTENT_ENV, "").strip().lower() == "true"
+    _capture_content = capture_content
+    _redact = redact
     if _configured:
         return
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(JSONLFileSpanExporter(output_path)))
     trace.set_tracer_provider(provider)
     _configured = True
+
+
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_DIGIT_RUN = re.compile(r"\+?\(?\d[\d ().-]*\d")
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _phone_or_keep(match: re.Match) -> str:
+    run = match.group(0)
+    digits = sum(c.isdigit() for c in run)
+    if 7 <= digits <= 15 and not _ISO_DATE.fullmatch(run):
+        return "[PHONE]"
+    return run
+
+
+def basic_redactor(text: str) -> str:
+    """Replace email addresses and phone-like numbers (7-15 digits, ISO dates kept)
+    with placeholders.
+
+    A starting point, not a PII detector: names and street addresses pass through,
+    and long numeric IDs are treated as phone numbers. Use a dedicated tool
+    (e.g. Microsoft Presidio) where that matters.
+    """
+    return _DIGIT_RUN.sub(_phone_or_keep, _EMAIL.sub("[EMAIL]", text))
+
+
+def record_query(span: Span, text: str) -> None:
+    """Record the retrieval query as gen_ai.retrieval.query.text, only if content
+    capture is on, after redaction if configured."""
+    if _capture_content:
+        span.set_attribute("gen_ai.retrieval.query.text", _redact(text) if _redact else text)
+
+
+_FILE_PATH = re.compile(r'File "(?:[^"]*[/\\])?([^"/\\]+)"')
+
+
+def _record_exception(span: Span, exc: BaseException) -> None:
+    """record_exception, with file names instead of absolute paths in the stack trace,
+    so traces don't carry the machine's username or directory layout."""
+    stacktrace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    span.record_exception(exc, attributes={"exception.stacktrace": _FILE_PATH.sub(r'File "\1"', stacktrace)})
 
 
 def _tracer() -> trace.Tracer:
@@ -112,8 +180,13 @@ def _tracer() -> trace.Tracer:
 @contextmanager
 def traced_request(name: str = "rag_request") -> Iterator[Span]:
     """The root span for one end-to-end RAG request; every stage nests under it."""
-    with _tracer().start_as_current_span(name) as span:
-        yield span
+    with _tracer().start_as_current_span(name, record_exception=False, set_status_on_exception=False) as span:
+        try:
+            yield span
+        except BaseException as exc:
+            _record_exception(span, exc)
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            raise
         span.set_status(Status(StatusCode.OK))
 
 
@@ -133,7 +206,7 @@ def traced_stage(stage: StageType, name: str, **attributes: str | int | float | 
         try:
             yield span
         except Exception as exc:
-            span.record_exception(exc)
+            _record_exception(span, exc)
             span.set_status(Status(StatusCode.ERROR, str(exc)))
             raise
         else:
