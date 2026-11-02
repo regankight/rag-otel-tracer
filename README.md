@@ -132,6 +132,63 @@ Trace 95e60af593bd  total=46.5ms
   llm_generate                  1.4ms   model=gpt-4o-mini, in=? out=? tokens  [ERROR]
 ```
 
+The demo's stages are stand-ins (random scores, `sleep()` timings), so these numbers
+show the report format, not real performance. For real numbers, see below.
+
+## Traced on a real pipeline
+
+The demo above fakes every stage. [`examples/trace_real_pipeline.py`](examples/trace_real_pipeline.py)
+wraps the same tracer around working code:
+
+- **retrieval** from [rag-search-mcp-server](https://github.com/regankight/rag-search-mcp-server):
+  `all-MiniLM-L6-v2` embeddings and cosine similarity over its five sample documents
+- **context assembly** into a 400-token budget, counted with the embedding model's own tokenizer
+- **generation** by `llama3.2` through Ollama, recording the token counts Ollama reports
+
+There is no rerank stage, because that pipeline has none. The last request asks for a model
+that isn't installed, so its error span comes from a real failure, not a deliberate `raise`.
+
+```bash
+pip install -r requirements.txt -r requirements-examples.txt
+ollama pull llama3.2
+python examples/trace_real_pipeline.py --search-repo ../rag-search-mcp-server
+python report.py examples/real_trace.jsonl
+```
+
+One run on a MacBook Air, committed as [`examples/real_trace.jsonl`](examples/real_trace.jsonl).
+The first trace is the one-off index build (loading the embedding model and embedding the chunks):
+
+```
+Trace e3251209d5a6  total=6680.5ms
+
+Trace 05b9316df1c8  total=8670.7ms
+  embedding_search             17.0ms   3 docs retrieved, top_score=0.6751
+  assemble_context              0.6ms   2 chunks assembled, 331/400 tokens used
+  ollama_chat                8651.7ms   model=llama3.2, in=374 out=60 tokens
+
+Trace 951b5f56f9d9  total=2364.1ms
+  embedding_search            267.8ms   3 docs retrieved, top_score=0.6152
+  assemble_context              0.7ms   2 chunks assembled, 327/400 tokens used
+  ollama_chat                2094.8ms   model=llama3.2, in=385 out=63 tokens
+
+Trace 7d2f564caa94  total=78.0ms
+  embedding_search             71.6ms   3 docs retrieved, top_score=0.3732
+  assemble_context              0.8ms   2 chunks assembled, 331/400 tokens used
+  ollama_chat                   4.6ms   model=model-that-is-not-installed, in=? out=? tokens  [ERROR]
+```
+
+What the trace shows:
+
+- **Generation is nearly all of the latency:** 8,652 of 8,671 ms on the first request and
+  2,095 of 2,364 ms on the second. Retrieval and context assembly never took more than 269 ms together.
+- **The first LLM call took about 4× as long as the second** (8.7 s vs 2.1 s) for similar prompts
+  (374 vs 385 input tokens). That fits Ollama loading the model on first use. The trace shows
+  where the time went; it can't say why.
+- **A missing model fails fast and visibly:** 4.6 ms, `status=ERROR`, with the exception on the
+  span, while the stages before it are recorded normally.
+- **Retrieval varied from 17 ms to 268 ms** across the three requests. These are single runs
+  on one laptop, not a benchmark.
+
 ## Tests
 
 ```bash

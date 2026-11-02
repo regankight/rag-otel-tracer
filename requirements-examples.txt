@@ -1,0 +1,4 @@
+# Only for examples/trace_real_pipeline.py; the tracer itself needs requirements.txt alone.
+sentence-transformers>=6,<7
+numpy>=2,<3
+ollama
