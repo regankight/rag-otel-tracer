@@ -142,12 +142,13 @@ def traced_stage(stage: StageType, name: str, **attributes: str | int | float | 
 def record_retrieved_documents(span: Span, documents: Sequence[RetrievedDocument]) -> None:
     """Attach a validated list of retrieved documents to a retrieval span.
 
-    One OTel event per document (not a single JSON-blob attribute): the
-    GenAI semantic conventions require retrieval documents to be recorded
-    in *structured* form on events, whereas span attributes are flat by
-    design and only permit a JSON-string fallback. Events keep each
-    document's id/score/rank queryable individually by anything reading the
-    trace, not just greppable as a blob.
+    One OTel event per document (not a single JSON-blob attribute). The
+    GenAI semantic conventions define gen_ai.retrieval.documents as a list
+    of {id, score} objects, structured on events and preferably on spans,
+    but span attributes can't hold nested objects, so on a span it would
+    become a JSON string. One event per document, with gen_ai.document.*
+    attribute names chosen by this project (not defined by the
+    conventions), keeps each document's id/score/rank queryable on its own.
     """
     span.set_attribute("retrieval.document_count", len(documents))
     if documents:

@@ -36,11 +36,15 @@ anyone who already knows this vocabulary.
 **Retrieved documents are recorded as span *events*, one per document — not a
 single JSON-blob attribute.** OTel span attributes are flat by design (a string,
 number, bool, or a homogeneous array of one of those) — there's no way to attach a
-nested object to a single attribute. The GenAI semantic conventions require
-retrieval documents to be recorded in *structured* form on events specifically
-(spans only get a JSON-string fallback). One event per document keeps each
-document's `id`/`score`/`rank` independently queryable by anything reading the
-trace, rather than a blob you can only grep.
+nested object to a single attribute. The GenAI semantic conventions define
+`gen_ai.retrieval.documents` as a list of `{id, score}` objects: structured when
+recorded on an event, and on a span preferably structured, with a JSON string as
+the fallback where structured values aren't supported. Splitting the list into one
+event per document, with `gen_ai.document.id`/`score`/`rank` attributes, is this
+project's own design, not something the conventions require (they don't define
+those per-document attribute names). It keeps each document's fields
+independently queryable by anything reading the trace, rather than a JSON blob
+you can only grep.
 
 **Pydantic validates the boundary, not the wire format.** `RetrievedDocument` is a
 Pydantic model used *before* data gets flattened into OTel events — it's the type
