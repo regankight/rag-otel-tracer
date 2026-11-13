@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -125,19 +128,62 @@ def test_stack_traces_name_files_without_their_directories():
         assert str(Path(__file__).parent) not in stacktrace
 
 
-def test_otel_sampler_env_var_does_not_drop_spans(tmp_path):
-    # Fresh process: the global provider can only be set once per process.
-    import os
-    import subprocess
-    import sys
-
+def _run_fresh(tmp_path, body: str, env: dict[str, str]) -> subprocess.CompletedProcess:
+    """Run code in a new interpreter: the global tracer provider can only be set once
+    per process, so these tests can't share this module's configure()."""
     out = tmp_path / "t.jsonl"
-    code = (
-        "from tracer import configure, traced_request\n"
-        f"configure({str(out)!r})\n"
-        "with traced_request('req'): pass\n"
+    code = f"from tracer import *\nfrom models import *\nOUT = {str(out)!r}\n" + body
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        env={**os.environ, **env},
+        cwd=Path(__file__).parent.parent,
+        capture_output=True,
+        text=True,
     )
-    env = {**os.environ, "OTEL_TRACES_SAMPLER": "always_off"}
-    root = Path(__file__).parent.parent
-    subprocess.run([sys.executable, "-c", code], env=env, cwd=root, check=True)
-    assert out.exists() and out.read_text().strip()
+
+
+def test_otel_sampler_env_var_does_not_drop_spans(tmp_path):
+    body = "configure(OUT)\nwith traced_request('req'): pass\n"
+    result = _run_fresh(tmp_path, body, {"OTEL_TRACES_SAMPLER": "always_off"})
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "t.jsonl").read_text().strip()
+
+
+def test_otel_limit_env_vars_do_not_drop_or_truncate(tmp_path):
+    body = (
+        "configure(OUT)\n"
+        "docs = [RetrievedDocument(id=f'doc-number-{i}', score=0.5, rank=i) for i in range(200)]\n"
+        "with traced_request('req'):\n"
+        "    with traced_stage(StageType.RETRIEVAL, 'retrieve') as span:\n"
+        "        record_retrieved_documents(span, docs)\n"
+    )
+    limits = {
+        "OTEL_SPAN_EVENT_COUNT_LIMIT": "1",
+        "OTEL_EVENT_ATTRIBUTE_COUNT_LIMIT": "1",
+        "OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT": "1",
+        "OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT": "3",
+        "OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT": "3",
+    }
+    result = _run_fresh(tmp_path, body, limits)
+    assert result.returncode == 0, result.stderr
+    spans = [json.loads(line) for line in (tmp_path / "t.jsonl").read_text().splitlines()]
+    retrieve = next(s for s in spans if s["name"] == "retrieve")
+    assert len(retrieve["events"]) == 200  # also more than OTel's default cap of 128
+    assert retrieve["events"][199]["attributes"] == {
+        "gen_ai.document.id": "doc-number-199",
+        "gen_ai.document.score": 0.5,
+        "gen_ai.document.rank": 199,
+    }
+    assert retrieve["attributes"]["gen_ai.operation.name"] == "retrieval"
+
+
+def test_configure_fails_loudly_if_another_provider_is_already_set(tmp_path):
+    body = (
+        "from opentelemetry import trace\n"
+        "from opentelemetry.sdk.trace import TracerProvider\n"
+        "trace.set_tracer_provider(TracerProvider())\n"
+        "configure(OUT)\n"
+    )
+    result = _run_fresh(tmp_path, body, {})
+    assert result.returncode != 0
+    assert "RuntimeError" in result.stderr

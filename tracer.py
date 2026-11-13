@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Callable, Iterator, Sequence
 
 from opentelemetry import trace
-from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.trace import ReadableSpan, SpanLimits, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 from opentelemetry.sdk.trace.sampling import ALWAYS_ON, Sampler
 from opentelemetry.trace import Span, Status, StatusCode
@@ -48,6 +48,20 @@ _configured = False
 CAPTURE_CONTENT_ENV = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
 _capture_content = False
 _redact: Callable[[str], str] | None = None
+
+# Every field set, because SpanLimits() fills any field left as None from an OTEL_*_LIMIT
+# environment variable. Events and attribute lengths are unlimited so every retrieved
+# document and the full stack trace reach the file; counts keep the OTel default of 128.
+DEFAULT_SPAN_LIMITS = SpanLimits(
+    max_attributes=128,
+    max_span_attributes=128,
+    max_event_attributes=128,
+    max_link_attributes=128,
+    max_links=128,
+    max_events=SpanLimits.UNSET,
+    max_attribute_length=SpanLimits.UNSET,
+    max_span_attribute_length=SpanLimits.UNSET,
+)
 
 
 class JSONLFileSpanExporter(SpanExporter):
@@ -106,6 +120,7 @@ def configure(
     capture_content: bool | None = None,
     redact: Callable[[str], str] | None = None,
     sampler: Sampler = ALWAYS_ON,
+    span_limits: SpanLimits = DEFAULT_SPAN_LIMITS,
 ) -> None:
     """Point the global tracer provider at a JSONL file. Call once, at startup.
 
@@ -119,6 +134,13 @@ def configure(
     so the OTEL_TRACES_SAMPLER environment variable can't silently drop spans
     (TracerProvider() with no sampler reads it). Pass e.g.
     ParentBased(TraceIdRatioBased(0.1)) to sample on purpose.
+    span_limits: caps on attributes/events per span. Defaults to DEFAULT_SPAN_LIMITS,
+    set explicitly for the same reason (OTEL_*_LIMIT variables would otherwise apply).
+    OTEL_SDK_DISABLED=true is still honoured: it is OpenTelemetry's deliberate off switch.
+
+    Raises RuntimeError if another global tracer provider was already set (by your
+    app, or by running under opentelemetry-instrument): OTel keeps the first one,
+    so this tracer's spans would never reach the file.
 
     Idempotent -- safe to call multiple times (e.g. once per test) without
     stacking up duplicate processors, since re-configuring a provider that's
@@ -132,9 +154,14 @@ def configure(
     _redact = redact
     if _configured:
         return
-    provider = TracerProvider(sampler=sampler)
+    provider = TracerProvider(sampler=sampler, span_limits=span_limits)
     provider.add_span_processor(SimpleSpanProcessor(JSONLFileSpanExporter(output_path)))
     trace.set_tracer_provider(provider)
+    if trace.get_tracer_provider() is not provider:
+        raise RuntimeError(
+            "A global OpenTelemetry tracer provider was already set, so configure() "
+            "can't install its JSONL exporter and no trace file would be written."
+        )
     _configured = True
 
 
