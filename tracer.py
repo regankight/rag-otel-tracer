@@ -35,6 +35,7 @@ from typing import Callable, Iterator, Sequence
 from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
+from opentelemetry.sdk.trace.sampling import ALWAYS_ON, Sampler
 from opentelemetry.trace import Span, Status, StatusCode
 
 from models import RetrievedDocument, StageType
@@ -104,6 +105,7 @@ def configure(
     *,
     capture_content: bool | None = None,
     redact: Callable[[str], str] | None = None,
+    sampler: Sampler = ALWAYS_ON,
 ) -> None:
     """Point the global tracer provider at a JSONL file. Call once, at startup.
 
@@ -113,6 +115,10 @@ def configure(
     access than the application's own data.
     redact: applied to every captured text before it is recorded, e.g.
     basic_redactor or your own PII scrubber.
+    sampler: which requests get recorded. Defaults to ALWAYS_ON, set explicitly
+    so the OTEL_TRACES_SAMPLER environment variable can't silently drop spans
+    (TracerProvider() with no sampler reads it). Pass e.g.
+    ParentBased(TraceIdRatioBased(0.1)) to sample on purpose.
 
     Idempotent -- safe to call multiple times (e.g. once per test) without
     stacking up duplicate processors, since re-configuring a provider that's
@@ -126,7 +132,7 @@ def configure(
     _redact = redact
     if _configured:
         return
-    provider = TracerProvider()
+    provider = TracerProvider(sampler=sampler)
     provider.add_span_processor(SimpleSpanProcessor(JSONLFileSpanExporter(output_path)))
     trace.set_tracer_provider(provider)
     _configured = True

@@ -123,3 +123,21 @@ def test_stack_traces_name_files_without_their_directories():
         stacktrace = events[0]["attributes"]["exception.stacktrace"]
         assert 'File "test_tracer.py"' in stacktrace
         assert str(Path(__file__).parent) not in stacktrace
+
+
+def test_otel_sampler_env_var_does_not_drop_spans(tmp_path):
+    # Fresh process: the global provider can only be set once per process.
+    import os
+    import subprocess
+    import sys
+
+    out = tmp_path / "t.jsonl"
+    code = (
+        "from tracer import configure, traced_request\n"
+        f"configure({str(out)!r})\n"
+        "with traced_request('req'): pass\n"
+    )
+    env = {**os.environ, "OTEL_TRACES_SAMPLER": "always_off"}
+    root = Path(__file__).parent.parent
+    subprocess.run([sys.executable, "-c", code], env=env, cwd=root, check=True)
+    assert out.exists() and out.read_text().strip()
