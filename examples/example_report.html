@@ -20,6 +20,7 @@
 </table>
 <h2>Trace 95e60af593bd <span class='total'>total 43.4ms</span></h2>
 <table><tr><th>Stage</th><th>Duration</th><th>Detail</th><th>Status</th></tr>
+<tr class='error'><td>rag_request</td><td>43.4ms</td><td>request failed: TimeoutError: generation call timed out after 30s</td><td>ERROR</td></tr>
 <tr><td>es_hybrid_search</td><td>20.3ms</td><td>1 docs retrieved, top_score=0.57</td><td>OK</td></tr>
 <tr><td>cross_encoder_rerank</td><td>10.4ms</td><td>1 -&gt; 1 docs reranked</td><td>OK</td></tr>
 <tr><td>assemble_context</td><td>5.2ms</td><td>1 chunks assembled, 13/200 tokens used</td><td>OK</td></tr>

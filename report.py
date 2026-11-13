@@ -57,13 +57,26 @@ def _stage_detail(span: SpanRecord) -> str:
     return ""
 
 
+def _error_detail(span: SpanRecord) -> str:
+    """'Type: message' from the span's recorded exception, or '' if there isn't one."""
+    for event in span.events:
+        if event.get("name") == "exception":
+            attrs = event.get("attributes", {})
+            return f"{attrs.get('exception.type', 'error')}: {attrs.get('exception.message', '')}"
+    return ""
+
+
 def render_text(traces: list[TraceRecord]) -> str:
     lines = []
     for trace in traces:
         lines.append(f"Trace {trace.trace_id[:12]}  total={trace.duration_ms:.1f}ms")
         for span in trace.spans:
             if span.parent_span_id is None:
-                continue  # root span itself carries no stage detail
+                # The root span has no stage detail, but a failure raised outside every
+                # stage is only recorded here, so show it rather than skip it.
+                if span.status != "OK":
+                    lines.append(f"  {span.name:<24} {'':>10}   request failed: {_error_detail(span)}  [{span.status}]")
+                continue
             status_flag = "" if span.status == "OK" else f"  [{span.status}]"
             detail = _stage_detail(span)
             lines.append(f"  {span.name:<24} {span.duration_ms:>8.1f}ms   {detail}{status_flag}")
@@ -78,13 +91,14 @@ def render_html(traces: list[TraceRecord]) -> str:
                      f"<span class='total'>total {trace.duration_ms:.1f}ms</span></h2>")
         rows.append("<table><tr><th>Stage</th><th>Duration</th><th>Detail</th><th>Status</th></tr>")
         for span in trace.spans:
-            if span.parent_span_id is None:
+            if span.parent_span_id is None and span.status == "OK":
                 continue
+            detail = _stage_detail(span) if span.parent_span_id else f"request failed: {_error_detail(span)}"
             css = "" if span.status == "OK" else " class='error'"
             rows.append(
                 f"<tr{css}><td>{html_module.escape(span.name)}</td>"
                 f"<td>{span.duration_ms:.1f}ms</td>"
-                f"<td>{html_module.escape(_stage_detail(span))}</td>"
+                f"<td>{html_module.escape(detail)}</td>"
                 f"<td>{html_module.escape(span.status)}</td></tr>"
             )
         rows.append("</table>")
