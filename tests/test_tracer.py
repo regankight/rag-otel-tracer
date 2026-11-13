@@ -187,3 +187,44 @@ def test_configure_fails_loudly_if_another_provider_is_already_set(tmp_path):
     result = _run_fresh(tmp_path, body, {})
     assert result.returncode != 0
     assert "RuntimeError" in result.stderr
+
+
+def test_top_score_is_the_highest_score_not_the_first():
+    docs = [RetrievedDocument(id="low", score=0.2, rank=1), RetrievedDocument(id="high", score=0.9, rank=0)]
+    with traced_request("req"):
+        with traced_stage(StageType.RETRIEVAL, "unique_span_unsorted") as span:
+            record_retrieved_documents(span, docs)
+
+    assert _span_named("unique_span_unsorted")["attributes"]["retrieval.top_score"] == 0.9
+
+
+def test_configure_rejects_a_different_output_path(tmp_path):
+    configure(TRACE_FILE)  # same path again is fine
+    with pytest.raises(ValueError, match="can't switch"):
+        configure(tmp_path / "other.jsonl")
+
+
+def test_keyboard_interrupt_in_a_stage_marks_it_as_error():
+    with pytest.raises(KeyboardInterrupt):
+        with traced_request("req"):
+            with traced_stage(StageType.GENERATION, "unique_span_interrupted"):
+                raise KeyboardInterrupt
+
+    assert _span_named("unique_span_interrupted")["status"] == "ERROR"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("card 4111 1111 1111 1111", "card [CARD]"),
+        ("card 4111-1111-1111-1111", "card [CARD]"),
+        ("meeting 2024-01-15 10:30", "meeting 2024-01-15 10:30"),
+        ("at 2024-01-15T10:30:00", "at 2024-01-15T10:30:00"),
+        ("from 9:15 to 17:45", "from 9:15 to 17:45"),
+        ("server 192.168.10.12", "server [IP]"),
+        ("call +1 (555) 010-2030", "call [PHONE]"),
+        ("order 42", "order 42"),
+    ],
+)
+def test_basic_redactor_numbers(text, expected):
+    assert basic_redactor(text) == expected

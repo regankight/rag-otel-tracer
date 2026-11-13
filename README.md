@@ -119,8 +119,9 @@ GenAI instrumentations use:
 export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
 ```
 
-Pass `redact=` to scrub text before it's recorded. `basic_redactor` replaces email addresses and
-phone-like numbers with `[EMAIL]` and `[PHONE]`; it's a starting point, not a PII detector (names
+Pass `redact=` to scrub text before it's recorded. `basic_redactor` replaces email addresses, card
+numbers, IPv4 addresses and phone-like numbers with `[EMAIL]`, `[CARD]`, `[IP]` and `[PHONE]`, and
+keeps dates and times; it's a starting point, not a PII detector (names
 and street addresses pass through, and long numeric IDs are treated as phone numbers). Timings, scores, token counts and document IDs are always recorded.
 Exception messages are recorded as raised, so keep user content out of them. Stack traces name
 files without their directories, so a committed trace doesn't reveal the machine's username or folder layout.
@@ -145,6 +146,7 @@ Trace 6513270e269e  total=100.1ms
   llm_generate                 55.1ms   model=gpt-4o-mini, in=68 out=17 tokens
 
 Trace 95e60af593bd  total=46.5ms
+  rag_request                           request failed: TimeoutError: generation call timed out after 30s  [ERROR]
   es_hybrid_search             25.1ms   1 docs retrieved, top_score=0.57
   cross_encoder_rerank         12.6ms   1 -> 1 docs reranked
   assemble_context              6.3ms   1 chunks assembled, 13/200 tokens used
@@ -191,6 +193,7 @@ Trace 88624f637cc2  total=2510.2ms
   ollama_chat                2370.6ms   model=llama3.2, in=385 out=76 tokens
 
 Trace 3265dfaa4d55  total=71.6ms
+  rag_request                           request failed: ollama._types.ResponseError: model 'model-that-is-not-installed' not found (status code: 404)  [ERROR]
   embedding_search             64.8ms   3 docs retrieved, top_score=0.3732
   assemble_context              0.7ms   2 chunks assembled, 331/400 tokens used
   ollama_chat                   4.8ms   model=model-that-is-not-installed, in=? out=? tokens  [ERROR]

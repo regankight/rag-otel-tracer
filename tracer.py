@@ -42,6 +42,7 @@ from models import RetrievedDocument, StageType
 
 _TRACER_NAME = "rag_obs"
 _configured = False
+_configured_path: Path | None = None
 
 # The same switch the OpenTelemetry Python GenAI instrumentations use for prompt and
 # response content. Off unless set to "true".
@@ -142,12 +143,18 @@ def configure(
     app, or by running under opentelemetry-instrument): OTel keeps the first one,
     so this tracer's spans would never reach the file.
 
-    Idempotent -- safe to call multiple times (e.g. once per test) without
-    stacking up duplicate processors, since re-configuring a provider that's
-    already set is a no-op in the OTel SDK. The content settings are updated
-    on every call.
+    Idempotent -- safe to call multiple times (e.g. once per test) with the same
+    output_path; the content settings are updated on every call. A later call with
+    a different output_path raises ValueError, since the exporter can't be swapped
+    once the global provider is set and spans would keep going to the first file.
     """
-    global _configured, _capture_content, _redact
+    global _configured, _configured_path, _capture_content, _redact
+    path = Path(output_path).resolve()
+    if _configured and path != _configured_path:
+        raise ValueError(
+            f"configure() already sent traces to {_configured_path}; it can't switch to "
+            f"{path} in the same process."
+        )
     if capture_content is None:
         capture_content = os.environ.get(CAPTURE_CONTENT_ENV, "").strip().lower() == "true"
     _capture_content = capture_content
@@ -155,7 +162,7 @@ def configure(
     if _configured:
         return
     provider = TracerProvider(sampler=sampler, span_limits=span_limits)
-    provider.add_span_processor(SimpleSpanProcessor(JSONLFileSpanExporter(output_path)))
+    provider.add_span_processor(SimpleSpanProcessor(JSONLFileSpanExporter(path)))
     trace.set_tracer_provider(provider)
     if trace.get_tracer_provider() is not provider:
         raise RuntimeError(
@@ -163,30 +170,52 @@ def configure(
             "can't install its JSONL exporter and no trace file would be written."
         )
     _configured = True
+    _configured_path = path
 
 
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _DIGIT_RUN = re.compile(r"\+?\(?\d[\d ().-]*\d")
-_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# Matched before _DIGIT_RUN so their digits aren't read as a phone number:
+# ISO dates (optionally with a time), clock times, and IPv4 addresses.
+_DATE_OR_TIME = r"\d{4}-\d{2}-\d{2}(?:[T ]\d{1,2}:\d{2}(?::\d{2})?)?|\b\d{1,2}:\d{2}(?::\d{2})?\b"
+_IPV4 = r"\b\d{1,3}(?:\.\d{1,3}){3}\b"
+_NUMBERS = re.compile(rf"(?P<keep>{_DATE_OR_TIME})|(?P<ip>{_IPV4})|(?P<run>{_DIGIT_RUN.pattern})")
 
 
-def _phone_or_keep(match: re.Match) -> str:
+def _luhn_ok(digits: str) -> bool:
+    total = 0
+    for i, ch in enumerate(reversed(digits)):
+        d = int(ch)
+        if i % 2:
+            d = d * 2 - 9 if d > 4 else d * 2
+        total += d
+    return total % 10 == 0
+
+
+def _redact_number(match: re.Match) -> str:
+    if match.group("keep"):
+        return match.group(0)
+    if match.group("ip"):
+        return "[IP]"
     run = match.group(0)
-    digits = sum(c.isdigit() for c in run)
-    if 7 <= digits <= 15 and not _ISO_DATE.fullmatch(run):
+    digits = "".join(c for c in run if c.isdigit())
+    if 13 <= len(digits) <= 19 and _luhn_ok(digits):
+        return "[CARD]"
+    if 7 <= len(digits) <= 15:
         return "[PHONE]"
     return run
 
 
 def basic_redactor(text: str) -> str:
-    """Replace email addresses and phone-like numbers (7-15 digits, ISO dates kept)
-    with placeholders.
+    """Replace email addresses, payment-card numbers (13-19 digits passing the Luhn
+    check), IPv4 addresses and phone-like numbers (7-15 digits) with placeholders.
+    Dates and clock times are kept.
 
     A starting point, not a PII detector: names and street addresses pass through,
     and long numeric IDs are treated as phone numbers. Use a dedicated tool
     (e.g. Microsoft Presidio) where that matters.
     """
-    return _DIGIT_RUN.sub(_phone_or_keep, _EMAIL.sub("[EMAIL]", text))
+    return _NUMBERS.sub(_redact_number, _EMAIL.sub("[EMAIL]", text))
 
 
 def record_query(span: Span, text: str) -> None:
@@ -238,7 +267,7 @@ def traced_stage(stage: StageType, name: str, **attributes: str | int | float | 
             span.set_attribute(key, value)
         try:
             yield span
-        except Exception as exc:
+        except BaseException as exc:  # incl. KeyboardInterrupt, like traced_request
             _record_exception(span, exc)
             span.set_status(Status(StatusCode.ERROR, str(exc)))
             raise
@@ -259,7 +288,7 @@ def record_retrieved_documents(span: Span, documents: Sequence[RetrievedDocument
     """
     span.set_attribute("retrieval.document_count", len(documents))
     if documents:
-        span.set_attribute("retrieval.top_score", documents[0].score)
+        span.set_attribute("retrieval.top_score", max(doc.score for doc in documents))
     for doc in documents:
         span.add_event(
             "gen_ai.retrieval.documents",

@@ -56,3 +56,23 @@ def test_render_html_marks_errors(tmp_path):
     out = render_html(load_traces(path))
     assert "class='error'" in out
     assert "llm_generate" in out
+
+
+ROOT_FAILURE_FIXTURE = [
+    {**BASE_FIXTURE[0], "status": "ERROR", "events": [{
+        "name": "exception", "timestamp_ns": 90_000_000,
+        "attributes": {"exception.type": "ValueError", "exception.message": "post-processing blew up"},
+    }]},
+    BASE_FIXTURE[1],
+]
+
+
+def test_render_text_shows_a_failure_outside_every_stage(tmp_path):
+    text = render_text(load_traces(_write_fixture(tmp_path, ROOT_FAILURE_FIXTURE)))
+    assert "request failed: ValueError: post-processing blew up  [ERROR]" in text
+
+
+def test_render_html_shows_a_failure_outside_every_stage(tmp_path):
+    out = render_html(load_traces(_write_fixture(tmp_path, ROOT_FAILURE_FIXTURE)))
+    assert "class='error'" in out
+    assert "request failed: ValueError: post-processing blew up" in out
